@@ -83,6 +83,7 @@ const DEFAULT_AI_PROVIDERS = [
   }
 ];
 const EXPECTED_CONTENT_SCRIPT_VERSION = chrome.runtime.getManifest().version || "";
+const activeBatchControllers = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
   await initializeSettingsStorage();
@@ -959,7 +960,7 @@ async function loadBatchPage({ bvid, cid, pageIndex }) {
   };
 }
 
-async function runBatchAiCompletion({ providerId, systemPrompt, prompt }) {
+async function runBatchAiCompletion({ providerId, systemPrompt, prompt, signal }) {
   const providers = await loadAiProviders();
   const provider = providers.find((item) => item.id === String(providerId || ""));
   if (!provider) {
@@ -980,6 +981,7 @@ async function runBatchAiCompletion({ providerId, systemPrompt, prompt }) {
     response = await fetch(endpoint, {
       method: "POST",
       headers,
+      signal,
       body: JSON.stringify(buildChatCompletionBody({
         model: provider.model,
         stream: true,
@@ -991,6 +993,11 @@ async function runBatchAiCompletion({ providerId, systemPrompt, prompt }) {
       }))
     });
   } catch (error) {
+    if (signal?.aborted) {
+      const aborted = new Error("已暂停当前 AI 请求");
+      aborted.code = "ABORTED";
+      throw aborted;
+    }
     throw new Error(`AI 网络请求失败：${error?.message || error}`);
   }
   if (!response.ok) {
@@ -1014,6 +1021,11 @@ async function runBatchAiCompletion({ providerId, systemPrompt, prompt }) {
         content += token;
       }
     } catch (error) {
+      if (signal?.aborted) {
+        const aborted = new Error("已暂停当前 AI 请求");
+        aborted.code = "ABORTED";
+        throw aborted;
+      }
       throw new Error(`AI 流式响应解析失败：${error?.message || error}`);
     }
     if (content.trim()) {
@@ -1077,10 +1089,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "batch-ai-complete") {
-    runBatchAiCompletion(message)
+    const requestId = String(message.requestId || "").trim();
+    const controller = new AbortController();
+    if (requestId) activeBatchControllers.set(requestId, controller);
+    runBatchAiCompletion({ ...message, signal: controller.signal })
       .then((content) => sendResponse({ ok: true, content }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
+      .catch((error) => sendResponse({ ok: false, aborted: error?.code === "ABORTED", error: error.message }))
+      .finally(() => { if (requestId) activeBatchControllers.delete(requestId); });
     return true;
+  }
+
+  if (message.type === "batch-ai-cancel") {
+    const requestId = String(message.requestId || "").trim();
+    const controller = requestId ? activeBatchControllers.get(requestId) : null;
+    if (controller) controller.abort();
+    sendResponse({ ok: true, cancelled: Boolean(controller) });
+    return false;
   }
 
   if (message.type === "batch-ai-preflight") {

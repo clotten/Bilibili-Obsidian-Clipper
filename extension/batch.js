@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { course: null, groups: [], providerId: "", folder: "Clippings/Bilibili", settings: {}, autorun: false, running: false, paused: false, current: 0, completed: {}, summaries: {}, failed: [] };
+const state = { course: null, groups: [], providerId: "", folder: "Clippings/Bilibili", settings: {}, autorun: false, running: false, paused: false, current: 0, activeRequestId: "", completed: {}, summaries: {}, failed: [] };
 
 init().catch((error) => log(`初始化失败：${error.message}`));
 
@@ -20,7 +20,7 @@ async function init() {
 function bindEvents() {
   $("discoverBtn").addEventListener("click", discover);
   $("runBtn").addEventListener("click", run);
-  $("pauseBtn").addEventListener("click", () => { state.paused = true; state.running = false; $("pauseBtn").disabled = true; setRunButton(false); log("已暂停，可稍后点击开始生成继续。"); });
+  $("pauseBtn").addEventListener("click", () => { state.paused = true; state.running = false; $("pauseBtn").disabled = true; setRunButton(false); cancelActiveBatchRequest(); log("正在暂停：取消当前 AI 请求，完成收尾后停止。"); });
   $("clearCheckpointBtn").addEventListener("click", async () => { if (!state.course) return; await chrome.storage.local.remove(checkpointKey(state.course.bvid)); state.completed = {}; state.summaries = {}; state.failed = []; renderFailed(); log("已清除当前合集断点。"); });
   $("openOptionsBtn").addEventListener("click", () => runtime({ type: "open-options" }));
 }
@@ -142,6 +142,7 @@ async function processPage(page, number) {
   const subtitleOnly = existing.exists;
   updateProgress(number, `抓取字幕：${page.title}`); const loaded = await runtime({ type: "batch-load-page", bvid: page.bvid || state.course.bvid, cid: page.cid, pageIndex: page.page });
   if (!loaded?.ok) { addFailed(page, `字幕读取失败：${loaded?.error || "无法读取字幕"}`); return; }
+  if (!state.running || state.paused) return;
   const subtitleText = subtitleToSrt(loaded.page.subtitleBody);
   const subtitlePath = subtitleFilePath(state.course.title, group.name, videoFileName(page));
   const subtitleWritten = await writeNote(subtitlePath, subtitleText);
@@ -157,7 +158,8 @@ async function processPage(page, number) {
     return;
   }
   const subtitle = clip(loaded.page.subtitleMarkdown, 50000); const prompt = `请把下面这期课程视频整理成适合 Obsidian 复习的 Markdown 学习笔记。必须严格使用以下一级结构：\n## 本节目标\n## 核心知识点\n## 操作步骤与代码示例\n## 易错点\n## 本节总结\n## 练习题\n## 时间戳索引\n要求：不要写视频之外的内容；保留重要时间戳；没有代码时明确写“本节无代码示例”；信息不足写“字幕未提及”。只输出笔记正文。\n\n视频标题：${loaded.page.title}\n\n字幕：\n${subtitle}`;
-  updateProgress(number, `AI 总结：${page.title}`); const ai = await runtime({ type: "batch-ai-complete", providerId: state.providerId, systemPrompt: "你是严谨的课程笔记整理助手，必须忠实于字幕，不得编造。输出简洁、结构清晰的 Markdown。", prompt });
+  updateProgress(number, `AI 总结：${page.title}`); const ai = await runBatchAiRequest({ providerId: state.providerId, systemPrompt: "你是严谨的课程笔记整理助手，必须忠实于字幕，不得编造。输出简洁、结构清晰的 Markdown。", prompt });
+  if (ai?.aborted || state.paused) return;
   if (!ai?.ok) { addFailed(page, `AI 总结失败：${ai?.error || "未知错误"}`); return; }
   const content = videoNote(loaded.page, ai.content, subtitlePath, subtitleText); const written = await writeNote(path, content);
   if (!written?.ok) { addFailed(page, written?.error || "写入 Obsidian 失败"); return; }
@@ -165,8 +167,37 @@ async function processPage(page, number) {
 }
 
 async function buildAggregates() {
-  for (const group of state.groups) { const items = group.pages.map((page) => state.summaries[page.cid]).filter(Boolean); if (!items.length) continue; updateProgress(state.course.pages.length, `合成小合集：${group.name}`); const source = items.map((item) => `## ${item.page.title}\n\n${clip(item.summary, 12000)}`).join("\n\n"); const ai = await runtime({ type: "batch-ai-complete", providerId: state.providerId, systemPrompt: "你是课程主编，请只根据输入的多篇视频笔记合成完整教程，不得补充未提供的事实。", prompt: `请将以下同一小合集的视频笔记合成为一篇可以连续阅读的完整教程，同时提供知识点目录。输出结构：学习目标、知识点目录、完整教程、易错点、综合练习。单篇笔记链接由程序另行生成，不要虚构链接。只输出 Markdown 正文。\n\n${clip(source, 60000)}` }); if (ai?.ok) await writeNote(notePath(state.course.title, group.name, "00-小合集完整教程"), chapterNote(group, ai.content)); else addFailed({ title: group.name, page: 0, url: "" }, ai?.error || "小合集合成失败"); }
-  const links = state.groups.map((group) => `- [[${group.name}/00-小合集完整教程|${group.name}]]`).join("\n"); const failed = state.failed.length ? `\n\n## 失败清单\n\n${state.failed.map((item) => `- ${item.title}：${item.reason}`).join("\n")}` : ""; await writeNote(notePath(state.course.title, "", "00-课程总目录"), `---\ntitle: ${state.course.title}\ntags: [bilibili, 学习笔记]\n---\n\n# ${state.course.title}\n\n作者：${state.course.author || "未知"}\n\n## 小合集\n\n${links}${failed}`); if (state.failed.length) await writeNote(notePath(state.course.title, "", "00-失败清单"), `# ${state.course.title} - 失败清单\n\n${state.failed.map((item) => `- **${item.title}**：${item.reason}`).join("\n")}`); }
+  for (const group of state.groups) {
+    if (!state.running || state.paused) break;
+    const items = group.pages.map((page) => state.summaries[page.cid]).filter(Boolean);
+    if (!items.length) continue;
+    const aggregatePath = notePath(state.course.title, group.name, "00-小合集完整教程");
+    const existing = await readNote(aggregatePath);
+    if (existing.exists && String(existing.content || "").trim()) {
+      log(`小合集已存在，跳过 AI 合成：${group.name}`);
+      continue;
+    }
+    updateProgress(state.course.pages.length, `合成小合集：${group.name}`);
+    const source = items.map((item) => `## ${item.page.title}\n\n${clip(item.summary, 12000)}`).join("\n\n");
+    const ai = await runBatchAiRequest({
+      type: "batch-ai-complete",
+      providerId: state.providerId,
+      systemPrompt: "你是课程主编，请只根据输入的多篇视频笔记合成完整教程，不得补充未提供的事实。",
+      prompt: `请将以下同一小合集的视频笔记合成为一篇可以连续阅读的完整教程，同时提供知识点目录。输出结构：学习目标、知识点目录、完整教程、易错点、综合练习。单篇笔记链接由程序另行生成，不要虚构链接。只输出 Markdown 正文。\n\n${clip(source, 60000)}`
+    });
+    if (ai?.aborted || state.paused) break;
+    if (ai?.ok) {
+      const written = await writeNote(aggregatePath, chapterNote(group, ai.content));
+      if (!written?.ok) addFailed({ title: group.name, page: 0, url: "" }, written?.error || "小合集写入失败");
+    } else {
+      addFailed({ title: group.name, page: 0, url: "" }, ai?.error || "小合集合成失败");
+    }
+  }
+  const links = state.groups.map((group) => `- [[${group.name}/00-小合集完整教程|${group.name}]]`).join("\n");
+  const failed = state.failed.length ? `\n\n## 失败清单\n\n${state.failed.map((item) => `- ${item.title}：${item.reason}`).join("\n")}` : "";
+  await writeNote(notePath(state.course.title, "", "00-课程总目录"), `---\ntitle: ${state.course.title}\ntags: [bilibili, 学习笔记]\n---\n\n# ${state.course.title}\n\n作者：${state.course.author || "未知"}\n\n## 小合集\n\n${links}${failed}`);
+  if (state.failed.length) await writeNote(notePath(state.course.title, "", "00-失败清单"), `# ${state.course.title} - 失败清单\n\n${state.failed.map((item) => `- **${item.title}**：${item.reason}`).join("\n")}`);
+}
 
 function groupFor(page) { return state.groups.find((group) => group.pages.some((item) => item.cid === page.cid)) || { key: "未分类", name: "未分类", pages: [] }; }
 function videoNote(page, body, subtitlePath, subtitleText) { const subtitleName = String(subtitlePath || "").split("/").pop() || "字幕.srt"; const safeSubtitle = String(subtitleText || "（字幕为空）").replaceAll("```", "` ` `"); return `---\ntitle: ${page.title}\nsource: ${page.url}\nbvid: ${page.bvid}\ncid: ${page.cid}\ntags: [bilibili, 学习笔记]\n---\n\n# ${page.title}\n\n来源：[B 站视频](${page.url})\n\n${body.trim()}\n\n---\n\n## 原始字幕\n\n> 字幕文件：[${subtitleName}](${subtitleName})\n\n<details>\n<summary>展开完整字幕</summary>\n\n\`\`\`srt\n${safeSubtitle}\n\`\`\`\n\n</details>\n`;
@@ -197,3 +228,5 @@ function clip(value, max) { const text = String(value || ""); return text.length
 function escapeHtml(value) { return String(value || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;"); }
 async function checkObsidianConnection() { const node = $("obsidianStatus"); const baseUrl = String(state.settings?.obsidianApiBaseUrl || "").trim(); const apiKey = String(state.settings?.obsidianApiKey || "").trim(); if (!baseUrl || !apiKey) { if (node) node.textContent = "⚠ Obsidian 尚未配置：请点击右上角“设置”填写 Local REST API 地址和 Key。"; return false; } const resp = await runtime({ type: "test-obsidian-connection", baseUrl, apiKey }).catch((error) => ({ ok: false, error: error.message })); if (node) { node.textContent = resp?.ok ? "✓ Obsidian 已连接：生成的笔记会自动导入当前仓库。" : `⚠ Obsidian 连接失败：${resp?.error || "请确认 Obsidian 已打开"}`; node.style.color = resp?.ok ? "#15803d" : "#b45309"; } return Boolean(resp?.ok); }
 function runtime(message) { return new Promise((resolve, reject) => chrome.runtime.sendMessage(message, (resp) => { if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message)); else resolve(resp); })); }
+async function runBatchAiRequest(payload) { const requestId = `batch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`; state.activeRequestId = requestId; try { return await runtime({ ...payload, type: "batch-ai-complete", requestId }); } finally { if (state.activeRequestId === requestId) state.activeRequestId = ""; } }
+function cancelActiveBatchRequest() { const requestId = state.activeRequestId; if (requestId) runtime({ type: "batch-ai-cancel", requestId }).catch(() => {}); }
