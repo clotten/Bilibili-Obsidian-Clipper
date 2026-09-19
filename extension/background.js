@@ -973,8 +973,8 @@ async function runBatchAiCompletion({ providerId, systemPrompt, prompt }) {
         headers,
         body: JSON.stringify({
           model: provider.model,
-          stream: false,
-          temperature: 0.2,
+          stream: true,
+          temperature: typeof provider.temperature === "number" ? provider.temperature : 0.7,
           messages: [
             { role: "system", content: String(systemPrompt || "") },
             { role: "user", content: String(prompt || "") }
@@ -985,26 +985,50 @@ async function runBatchAiCompletion({ providerId, systemPrompt, prompt }) {
       lastError = new Error(`AI 网络请求失败：${error?.message || error}`);
       continue;
     }
-    const responseText = await response.text().catch(() => "");
-    let payload = null;
-    try {
-      payload = responseText ? JSON.parse(responseText) : null;
-    } catch {
-      lastError = new Error(`AI 地址返回了网页 HTML，而不是 JSON：${endpoint}。请检查 Base URL，通常需要以 /v1 结尾。`);
-      continue;
-    }
     if (!response.ok) {
+      const responseText = await response.text().catch(() => "");
+      let payload = null;
+      try {
+        payload = responseText ? JSON.parse(responseText) : null;
+      } catch {}
       const detail = String(payload?.error?.message || payload?.message || responseText || "").slice(0, 300);
       lastError = new Error(`AI 请求失败：HTTP ${response.status}${detail ? ` ${detail}` : ""}`);
       if (response.status === 404) continue;
       throw lastError;
     }
-    const content = payload?.choices?.[0]?.message?.content;
-    if (typeof content !== "string" || !content.trim()) {
-      lastError = new Error(`AI 返回格式不兼容：${endpoint} 没有 choices[0].message.content`);
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (contentType.includes("text/html")) {
+      await response.text().catch(() => "");
+      lastError = new Error(`AI 地址返回了网页 HTML：${endpoint}`);
       continue;
     }
-    return content.trim();
+    if (contentType.includes("text/event-stream")) {
+      let content = "";
+      try {
+        for await (const token of parseOpenAISSE(response)) {
+          content += token;
+        }
+      } catch (error) {
+        lastError = new Error(`AI 流式响应解析失败：${error?.message || error}`);
+        continue;
+      }
+      if (content.trim()) {
+        return content.trim();
+      }
+      lastError = new Error(`AI 返回了空的流式内容：${endpoint}`);
+      continue;
+    }
+    const responseText = await response.text().catch(() => "");
+    try {
+      const payload = responseText ? JSON.parse(responseText) : null;
+      const content = payload?.choices?.[0]?.message?.content;
+      if (typeof content === "string" && content.trim()) {
+        return content.trim();
+      }
+      lastError = new Error(`AI 返回格式不兼容：${endpoint}`);
+    } catch {
+      lastError = new Error(`AI 地址返回了非 JSON 内容：${endpoint}`);
+    }
   }
   throw lastError || new Error("AI 请求失败：没有可用的 Chat Completions 地址");
 }
@@ -1977,15 +2001,6 @@ async function testAiConnection({ baseUrl, apiKey, model }) {
   let lastResult = { ok: false, error: "没有找到可用的 OpenAI 兼容接口" };
   for (const candidateBaseUrl of [...new Set(baseCandidates)]) {
     const modelProbe = await probeAiModels({ baseUrl: candidateBaseUrl, headers });
-    if (modelProbe.ok && modelProbe.models.length && !modelProbe.models.includes(normalizedModel)) {
-      const suggestions = modelProbe.models.slice(0, 12).join("、");
-      lastResult = {
-        ok: false,
-        error: `模型「${normalizedModel}」不在接口返回的模型列表中。可用模型示例：${suggestions}`,
-        models: modelProbe.models
-      };
-      continue;
-    }
     const result = await probeAiChatCompletion({
       baseUrl: candidateBaseUrl,
       apiKey,
@@ -1995,7 +2010,16 @@ async function testAiConnection({ baseUrl, apiKey, model }) {
     if (result.ok) {
       return { ...result, resolvedBaseUrl: candidateBaseUrl };
     }
-    lastResult = result;
+    if (modelProbe.ok && modelProbe.models.length && !modelProbe.models.includes(normalizedModel)) {
+      const suggestions = modelProbe.models.slice(0, 12).join("、");
+      lastResult = {
+        ...result,
+        error: `${result.error}；接口模型列表未包含「${normalizedModel}」，可用模型示例：${suggestions}`,
+        models: modelProbe.models
+      };
+    } else {
+      lastResult = result;
+    }
   }
   return lastResult;
 }
@@ -2039,9 +2063,7 @@ async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
       headers: requestHeaders,
       body: JSON.stringify({
         model,
-        stream: false,
-        temperature: 0,
-        max_tokens: 1,
+        stream: true,
         messages: [{ role: "user", content: "ping" }]
       })
     });
@@ -2049,21 +2071,28 @@ async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
     return { ok: false, error: `无法连接：${error?.message || error}` };
   }
 
-  let bodyText = "";
-  try {
-    bodyText = await response.text();
-  } catch {}
   if (response.ok) {
+    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+    if (contentType.includes("text/event-stream")) {
+      try {
+        for await (const _token of parseOpenAISSE(response)) {
+          // 测试请求只验证流式协议可正常读取。
+        }
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: `流式响应解析失败：${error?.message || error}` };
+      }
+    }
+    const bodyText = await response.text().catch(() => "");
     try {
       const payload = bodyText ? JSON.parse(bodyText) : null;
-      if (payload?.choices || payload?.id || payload?.object) {
-        return { ok: true };
-      }
+      if (payload?.choices || payload?.id || payload?.object) return { ok: true };
       return { ok: false, error: "接口返回格式不是 OpenAI 兼容响应" };
     } catch {
-      return { ok: false, error: "接口返回了网页 HTML；请检查 Base URL，通常需要以 /v1 结尾" };
+      return { ok: false, error: "接口返回了网页 HTML；正在尝试兼容的 /v1 路径" };
     }
   }
+  const bodyText = await response.text().catch(() => "");
   let parsedError = null;
   try {
     parsedError = bodyText ? JSON.parse(bodyText) : null;
