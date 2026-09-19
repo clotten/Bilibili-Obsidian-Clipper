@@ -107,7 +107,7 @@ async function run() {
   log("AI 连接正常，开始处理合集。");
   $("pauseBtn").disabled = false;
   const all = state.course.pages; $("progressBar").max = all.length; $("progressBar").value = Object.keys(state.completed).length;
-  for (let index = 0; index < all.length; index += 1) { if (!state.running || state.paused) break; const page = all[index]; state.current = index + 1; if (state.completed[page.cid] && state.summaries[page.cid]?.summary) { updateProgress(index + 1, `跳过已完成：${page.title}`); continue; } try { await processPage(page, index + 1); } catch (error) { addFailed(page, error?.message || "处理失败"); } await saveCheckpoint(); }
+  for (let index = 0; index < all.length; index += 1) { if (!state.running || state.paused) break; const page = all[index]; state.current = index + 1; if (state.completed[page.cid] && state.summaries[page.cid]?.summary && state.summaries[page.cid]?.hasSubtitle) { updateProgress(index + 1, `跳过已完成：${page.title}`); continue; } try { await processPage(page, index + 1); } catch (error) { addFailed(page, error?.message || "处理失败"); } await saveCheckpoint(); }
   if (state.running && !state.paused) { await buildAggregates(); state.running = false; log(`全部处理完成。笔记已自动写入当前 Obsidian 仓库：${state.folder}/${sanitize(state.course.title)}`); }
   else if (state.paused) log("已暂停，点击“开始生成”可继续。");
   setRunButton(false);
@@ -132,21 +132,36 @@ async function processPage(page, number) {
   const group = groupFor(page);
   const path = notePath(state.course.title, group.name, videoFileName(page));
   const existing = await readNote(path);
-  if (existing.exists) {
+  if (existing.exists && hasSubtitleAttachment(existing.content)) {
     state.completed[page.cid] = true;
-    if (!state.summaries[page.cid]?.summary) state.summaries[page.cid] = { page, summary: stripNoteMetadata(existing.content), groupKey: group.key };
+    if (!state.summaries[page.cid]?.summary) state.summaries[page.cid] = { page, summary: stripNoteMetadata(existing.content), groupKey: group.key, hasSubtitle: true };
     removeFailed(page);
     log(`Obsidian 已存在，跳过：${page.title}`);
     return;
   }
+  const subtitleOnly = existing.exists;
   updateProgress(number, `抓取字幕：${page.title}`); const loaded = await runtime({ type: "batch-load-page", bvid: page.bvid || state.course.bvid, cid: page.cid, pageIndex: page.page });
   if (!loaded?.ok) { addFailed(page, `字幕读取失败：${loaded?.error || "无法读取字幕"}`); return; }
+  const subtitleText = subtitleToSrt(loaded.page.subtitleBody);
+  const subtitlePath = subtitleFilePath(state.course.title, group.name, videoFileName(page));
+  const subtitleWritten = await writeNote(subtitlePath, subtitleText);
+  if (!subtitleWritten?.ok) { addFailed(page, `字幕文件写入失败：${subtitleWritten?.error || "无法写入 Obsidian"}`); return; }
+  if (subtitleOnly) {
+    const content = appendSubtitleToExisting(existing.content, subtitlePath, subtitleText);
+    const written = await writeNote(path, content);
+    if (!written?.ok) { addFailed(page, written?.error || "写入 Obsidian 失败"); return; }
+    state.completed[page.cid] = true;
+    state.summaries[page.cid] = { page, summary: stripNoteMetadata(existing.content), groupKey: group.key, hasSubtitle: true, subtitlePath };
+    removeFailed(page);
+    log(`已补齐字幕：${page.title}`);
+    return;
+  }
   const subtitle = clip(loaded.page.subtitleMarkdown, 50000); const prompt = `请把下面这期课程视频整理成适合 Obsidian 复习的 Markdown 学习笔记。必须严格使用以下一级结构：\n## 本节目标\n## 核心知识点\n## 操作步骤与代码示例\n## 易错点\n## 本节总结\n## 练习题\n## 时间戳索引\n要求：不要写视频之外的内容；保留重要时间戳；没有代码时明确写“本节无代码示例”；信息不足写“字幕未提及”。只输出笔记正文。\n\n视频标题：${loaded.page.title}\n\n字幕：\n${subtitle}`;
   updateProgress(number, `AI 总结：${page.title}`); const ai = await runtime({ type: "batch-ai-complete", providerId: state.providerId, systemPrompt: "你是严谨的课程笔记整理助手，必须忠实于字幕，不得编造。输出简洁、结构清晰的 Markdown。", prompt });
   if (!ai?.ok) { addFailed(page, `AI 总结失败：${ai?.error || "未知错误"}`); return; }
-  const content = videoNote(loaded.page, ai.content); const written = await writeNote(path, content);
+  const content = videoNote(loaded.page, ai.content, subtitlePath, subtitleText); const written = await writeNote(path, content);
   if (!written?.ok) { addFailed(page, written?.error || "写入 Obsidian 失败"); return; }
-  state.completed[page.cid] = true; state.summaries[page.cid] = { page, summary: ai.content, groupKey: group.key }; removeFailed(page); log(`完成 ${number}: ${page.title}`);
+  state.completed[page.cid] = true; state.summaries[page.cid] = { page, summary: ai.content, groupKey: group.key, hasSubtitle: true, subtitlePath }; removeFailed(page); log(`完成 ${number}: ${page.title}（含字幕）`);
 }
 
 async function buildAggregates() {
@@ -154,13 +169,19 @@ async function buildAggregates() {
   const links = state.groups.map((group) => `- [[${group.name}/00-小合集完整教程|${group.name}]]`).join("\n"); const failed = state.failed.length ? `\n\n## 失败清单\n\n${state.failed.map((item) => `- ${item.title}：${item.reason}`).join("\n")}` : ""; await writeNote(notePath(state.course.title, "", "00-课程总目录"), `---\ntitle: ${state.course.title}\ntags: [bilibili, 学习笔记]\n---\n\n# ${state.course.title}\n\n作者：${state.course.author || "未知"}\n\n## 小合集\n\n${links}${failed}`); if (state.failed.length) await writeNote(notePath(state.course.title, "", "00-失败清单"), `# ${state.course.title} - 失败清单\n\n${state.failed.map((item) => `- **${item.title}**：${item.reason}`).join("\n")}`); }
 
 function groupFor(page) { return state.groups.find((group) => group.pages.some((item) => item.cid === page.cid)) || { key: "未分类", name: "未分类", pages: [] }; }
-function videoNote(page, body) { return `---\ntitle: ${page.title}\nsource: ${page.url}\nbvid: ${page.bvid}\ncid: ${page.cid}\ntags: [bilibili, 学习笔记]\n---\n\n# ${page.title}\n\n来源：[B 站视频](${page.url})\n\n${body.trim()}\n`; }
+function videoNote(page, body, subtitlePath, subtitleText) { const subtitleName = String(subtitlePath || "").split("/").pop() || "字幕.srt"; const safeSubtitle = String(subtitleText || "（字幕为空）").replaceAll("```", "` ` `"); return `---\ntitle: ${page.title}\nsource: ${page.url}\nbvid: ${page.bvid}\ncid: ${page.cid}\ntags: [bilibili, 学习笔记]\n---\n\n# ${page.title}\n\n来源：[B 站视频](${page.url})\n\n${body.trim()}\n\n---\n\n## 原始字幕\n\n> 字幕文件：[${subtitleName}](${subtitleName})\n\n<details>\n<summary>展开完整字幕</summary>\n\n\`\`\`srt\n${safeSubtitle}\n\`\`\`\n\n</details>\n`;
+}
+function appendSubtitleToExisting(content, subtitlePath, subtitleText) { return `${String(content || "").replace(/\s*$/, "")}\n\n---\n\n## 原始字幕\n\n> 字幕文件：[${String(subtitlePath || "").split("/").pop() || "字幕.srt"}](${String(subtitlePath || "").split("/").pop() || "字幕.srt"})\n\n<details>\n<summary>展开完整字幕</summary>\n\n\`\`\`srt\n${String(subtitleText || "（字幕为空）").replaceAll("```", "` ` `")}\n\`\`\`\n\n</details>\n`; }
 function chapterNote(group, body) { return `---\ntitle: ${group.name}\ntags: [bilibili, 学习笔记, 章节总结]\n---\n\n# ${group.name}\n\n${body.trim()}\n\n## 视频笔记索引\n\n${group.pages.map((page) => `- [[${videoFileName(page)}|${page.title}]]`).join("\n")}\n`; }
 function notePath(course, group, name) { return [state.folder, sanitize(course), group && sanitize(group), `${sanitize(name)}.md`].filter(Boolean).join("/"); }
+function subtitleFilePath(course, group, name) { return [state.folder, sanitize(course), group && sanitize(group), `${sanitize(name)}.srt`].filter(Boolean).join("/"); }
 async function writeNote(filepath, content) { return runtime({ type: "write-obsidian-note", baseUrl: state.settings?.obsidianApiBaseUrl || undefined, apiKey: state.settings?.obsidianApiKey || undefined, filepath, content }).then((resp) => { if (resp?.ok) return resp; return resp; }); }
 async function noteExists(filepath) { const resp = await runtime({ type: "obsidian-note-exists", baseUrl: state.settings?.obsidianApiBaseUrl || undefined, apiKey: state.settings?.obsidianApiKey || undefined, filepath }); return Boolean(resp?.ok && resp.exists); }
 async function readNote(filepath) { const resp = await runtime({ type: "read-obsidian-note", baseUrl: state.settings?.obsidianApiBaseUrl || undefined, apiKey: state.settings?.obsidianApiKey || undefined, filepath }); return { exists: Boolean(resp?.ok && resp.exists), content: String(resp?.content || "") }; }
 function stripNoteMetadata(content) { return String(content || "").replace(/^---[\s\S]*?---\s*/m, "").slice(0, 20000); }
+function hasSubtitleAttachment(content) { return /## 原始字幕[\s\S]*字幕文件：/i.test(String(content || "")); }
+function subtitleToSrt(body) { return (Array.isArray(body) ? body : []).filter((item) => String(item?.content || "").trim()).map((item, index) => `${index + 1}\n${formatSrtTime(item?.from)} --> ${formatSrtTime(item?.to)}\n${String(item?.content || "").trim()}\n`).join("\n"); }
+function formatSrtTime(seconds) { const safe = Math.max(0, Number(seconds) || 0); const hours = Math.floor(safe / 3600); const minutes = Math.floor((safe % 3600) / 60); const wholeSeconds = Math.floor(safe % 60); const millis = Math.floor((safe - Math.floor(safe)) * 1000); return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")},${String(millis).padStart(3, "0")}`; }
 function videoFileName(page) { const order = Number(page.index || page.page || 0) || 0; return `${String(order).padStart(3, "0")}-${page.title}`; }
 function addFailed(page, reason) { const key = `${page.cid || page.title}`; if (!state.failed.some((item) => item.key === key)) state.failed.push({ key, title: page.title, page: page.page, url: page.url, reason: String(reason) }); log(`失败：${page.title}（${reason}）`); }
 function removeFailed(page) { const key = `${page.cid || page.title}`; state.failed = state.failed.filter((item) => item.key !== key); }

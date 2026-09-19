@@ -954,6 +954,7 @@ async function loadBatchPage({ bvid, cid, pageIndex }) {
     pageIndex: Number(page.page || pageIndex || 1),
     url: buildCanonicalVideoUrl(bvid, page.page || pageIndex || 1),
     subtitleLang: String(selectedTrack.lanDoc || selectedTrack.lan || "").trim(),
+    subtitleBody: body,
     subtitleMarkdown: buildAiConversationMarkdown(contextMeta, body, await getMergedSettings())
   };
 }

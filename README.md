@@ -125,6 +125,8 @@ Clippings/Bilibili/课程名/
 └─ 分组名/001-视频标题.md
 ```
 
+每篇视频笔记同时会保存同目录的 `001-视频标题.srt` 原始字幕文件，并在 Markdown 笔记末尾提供可折叠的完整字幕和文件链接。旧版已经生成、但没有字幕附件的笔记，继续运行批量任务时会自动补齐字幕，不会重复调用 AI 总结。
+
 ## 视频教程
 
 - [B 站教程](https://www.bilibili.com/video/BV15qQwB4EZ9/?spm_id_from=333.1387.homepage.video_card.click&vd_source=040bc5ea7866b419558ec2682a2ccb59)
