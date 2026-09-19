@@ -381,9 +381,24 @@ async function fetchJsonForAi(url) {
 
   const response = await fetch(url, options);
   if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    throw new Error(`B站接口 HTTP ${response.status}：${safeRequestLabel(url)}`);
   }
-  return response.json();
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    const kind = /^\s*</.test(text) ? "返回了网页 HTML" : "返回内容不是 JSON";
+    throw new Error(`B站接口${kind}：${safeRequestLabel(url)}`);
+  }
+}
+
+function safeRequestLabel(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    return `${parsed.hostname}${parsed.pathname}`;
+  } catch {
+    return "未知地址";
+  }
 }
 
 async function fetchBiliVideoMetaByBvid(bvid) {
@@ -405,8 +420,31 @@ async function fetchBiliVideoMetaByBvid(bvid) {
       cid: String(item?.cid || "").trim(),
       page: Number(item?.page || 0) || 0,
       part: String(item?.part || "").trim(),
-      duration: Number(item?.duration || 0) || 0
-    }))
+      duration: Number(item?.duration || 0) || 0,
+      bvid: String(bvid || "").trim(),
+      aid: String(data.aid || "").trim()
+    })),
+    ugcSeason: data.ugc_season && typeof data.ugc_season === "object"
+      ? {
+          name: String(data.ugc_season.name || "").trim(),
+          sections: Array.isArray(data.ugc_season.sections)
+            ? data.ugc_season.sections.map((section) => ({
+                title: String(section?.title || "").trim(),
+                episodes: Array.isArray(section?.episodes)
+                  ? section.episodes.map((episode) => ({
+                      bvid: String(episode?.bvid || episode?.arc?.bvid || "").trim(),
+                      aid: String(episode?.aid || episode?.arc?.aid || "").trim(),
+                      cid: String(episode?.cid || episode?.arc?.cid || "").trim(),
+                      title: String(episode?.title || episode?.arc?.title || "").trim(),
+                      page: Number(episode?.page || 1) || 1,
+                      duration: Number(episode?.duration || episode?.arc?.duration || 0) || 0,
+                      url: String(episode?.arcurl || "").trim()
+                    })).filter((episode) => episode.bvid && episode.cid && episode.title)
+                  : []
+              })).filter((section) => section.episodes.length)
+            : []
+        }
+      : null
   };
 }
 
@@ -833,6 +871,144 @@ async function resolveAiSidepanelPageRef(contextRef) {
   };
 }
 
+async function loadBatchCourse(bvid) {
+  const meta = await fetchBiliVideoMetaByBvid(String(bvid || "").trim());
+  const seasonEpisodes = meta.ugcSeason?.sections?.flatMap((section) => section.episodes.map((episode) => ({ ...episode, groupTitle: section.title }))) || [];
+  const sourcePages = seasonEpisodes.length ? seasonEpisodes : meta.pages;
+  if (!sourcePages.length) {
+    throw new Error("这个视频没有可处理的分 P");
+  }
+  return {
+    bvid: String(bvid || "").trim(),
+    title: meta.title,
+    author: meta.author,
+    uploadDate: meta.uploadDate,
+    aid: meta.aid,
+    pages: sourcePages.map((page, index) => ({
+      index: index + 1,
+      page: Number(page.page || index + 1),
+      cid: page.cid,
+      title: page.part || page.title || `P${index + 1}`,
+      duration: page.duration,
+      bvid: page.bvid || String(bvid || "").trim(),
+      aid: page.aid || meta.aid,
+      groupTitle: page.groupTitle || "",
+      url: page.url || buildCanonicalVideoUrl(page.bvid || bvid, page.page || index + 1)
+    }))
+  };
+}
+
+async function loadBatchPage({ bvid, cid, pageIndex }) {
+  const videoMeta = await fetchBiliVideoMetaByBvid(String(bvid || "").trim());
+  const page = pickPageForAiContext(videoMeta.pages, {
+    cid,
+    url: buildCanonicalVideoUrl(bvid, pageIndex)
+  });
+  if (!page?.cid) {
+    throw new Error("无法定位这个分 P");
+  }
+  const subtitleBundle = await fetchBiliSubtitleBundle({
+    bvid,
+    cid: page.cid,
+    aid: videoMeta.aid
+  });
+  const tracks = normalizeSubtitleTracks(subtitleBundle.tracks || []);
+  if (!tracks.length) {
+    const error = new Error("没有可用字幕");
+    error.code = "NO_SUBTITLE";
+    throw error;
+  }
+  const selectedTrack = pickPreferredSubtitleTrack(tracks) || tracks[0];
+  const body = await fetchBiliSubtitleBody(selectedTrack.subtitleUrl);
+  if (!body.length) {
+    const error = new Error("字幕内容为空");
+    error.code = "NO_SUBTITLE";
+    throw error;
+  }
+  const title = String(page.part || videoMeta.title || `P${pageIndex}`).trim();
+  const contextMeta = {
+    title,
+    chapters: subtitleBundle.chapters || [],
+    videoDuration: Number(page.duration || videoMeta.defaultDuration || 0) || 0
+  };
+  return {
+    title,
+    author: videoMeta.author,
+    uploadDate: videoMeta.uploadDate,
+    bvid: String(bvid || "").trim(),
+    cid: String(page.cid || "").trim(),
+    pageIndex: Number(page.page || pageIndex || 1),
+    url: buildCanonicalVideoUrl(bvid, page.page || pageIndex || 1),
+    subtitleLang: String(selectedTrack.lanDoc || selectedTrack.lan || "").trim(),
+    subtitleMarkdown: buildAiConversationMarkdown(contextMeta, body, await getMergedSettings())
+  };
+}
+
+async function runBatchAiCompletion({ providerId, systemPrompt, prompt }) {
+  const providers = await loadAiProviders();
+  const provider = providers.find((item) => item.id === String(providerId || ""));
+  if (!provider) {
+    throw new Error("未找到所选 AI 模型，请先到设置中配置");
+  }
+  const keys = await loadAiProviderKeys();
+  const apiKey = String(keys[provider.id] || "").trim();
+  if (provider.requiresKey !== false && !apiKey) {
+    throw new Error("所选 AI 模型没有配置 API Key");
+  }
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  const baseUrl = String(provider.baseUrl || "").trim().replace(/\/+$/, "");
+  const endpoints = [`${baseUrl}/chat/completions`];
+  if (!/\/v1$/i.test(baseUrl)) {
+    endpoints.push(`${baseUrl}/v1/chat/completions`);
+  }
+  let lastError = null;
+  for (const endpoint of [...new Set(endpoints)]) {
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: provider.model,
+          stream: false,
+          temperature: 0.2,
+          messages: [
+            { role: "system", content: String(systemPrompt || "") },
+            { role: "user", content: String(prompt || "") }
+          ]
+        })
+      });
+    } catch (error) {
+      lastError = new Error(`AI 网络请求失败：${error?.message || error}`);
+      continue;
+    }
+    const responseText = await response.text().catch(() => "");
+    let payload = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      lastError = new Error(`AI 地址返回了网页 HTML，而不是 JSON：${endpoint}。请检查 Base URL，通常需要以 /v1 结尾。`);
+      continue;
+    }
+    if (!response.ok) {
+      const detail = String(payload?.error?.message || payload?.message || responseText || "").slice(0, 300);
+      lastError = new Error(`AI 请求失败：HTTP ${response.status}${detail ? ` ${detail}` : ""}`);
+      if (response.status === 404) continue;
+      throw lastError;
+    }
+    const content = payload?.choices?.[0]?.message?.content;
+    if (typeof content !== "string" || !content.trim()) {
+      lastError = new Error(`AI 返回格式不兼容：${endpoint} 没有 choices[0].message.content`);
+      continue;
+    }
+    return content.trim();
+  }
+  throw lastError || new Error("AI 请求失败：没有可用的 Chat Completions 地址");
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object") {
     return false;
@@ -855,6 +1031,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "open-options") {
     chrome.tabs
       .create({ url: chrome.runtime.getURL("options.html") })
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "batch-load-course") {
+    loadBatchCourse(message.bvid)
+      .then((course) => sendResponse({ ok: true, course }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "batch-load-page") {
+    loadBatchPage(message)
+      .then((page) => sendResponse({ ok: true, page }))
+      .catch((error) => sendResponse({ ok: false, error: error.message, code: error.code || "" }));
+    return true;
+  }
+
+  if (message.type === "batch-ai-complete") {
+    runBatchAiCompletion(message)
+      .then((content) => sendResponse({ ok: true, content }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === "batch-ai-preflight") {
+    runBatchAiCompletion({
+      providerId: message.providerId,
+      systemPrompt: "这是连接测试。",
+      prompt: "只回复 OK"
+    })
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
@@ -1047,6 +1255,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => sendResponse({ ok: false, error: error.message }));
 
+    return true;
+  }
+
+  if (message.type === "read-obsidian-note") {
+    const baseUrl = String(message.baseUrl || "").trim();
+    const apiKey = String(message.apiKey || "").trim();
+    const filepath = String(message.filepath || "").trim();
+    if (!baseUrl || !apiKey || !filepath) {
+      sendResponse({ ok: false, error: "缺少 Local REST API 参数" });
+      return false;
+    }
+    const encodedPath = filepath.split("/").filter(Boolean).map((segment) => encodeURIComponent(segment)).join("/");
+    fetch(`${baseUrl.replace(/\/+$/g, "")}/vault/${encodedPath}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "text/markdown, text/plain, */*" },
+      cache: "no-store"
+    })
+      .then(async (response) => {
+        if (response.status === 404) return sendResponse({ ok: true, exists: false, content: "" });
+        if (!response.ok) return sendResponse({ ok: false, error: `HTTP ${response.status}` });
+        sendResponse({ ok: true, exists: true, content: await response.text() });
+      })
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
@@ -1739,12 +1970,59 @@ async function testAiConnection({ baseUrl, apiKey, model }) {
     headers["Authorization"] = `Bearer ${apiKey}`;
   }
 
-  return probeAiChatCompletion({
-    baseUrl: normalizedBaseUrl,
-    apiKey,
-    model: normalizedModel,
-    headers
-  });
+  const baseCandidates = [normalizedBaseUrl];
+  if (!/\/v1$/i.test(normalizedBaseUrl)) {
+    baseCandidates.push(`${normalizedBaseUrl}/v1`);
+  }
+  let lastResult = { ok: false, error: "没有找到可用的 OpenAI 兼容接口" };
+  for (const candidateBaseUrl of [...new Set(baseCandidates)]) {
+    const modelProbe = await probeAiModels({ baseUrl: candidateBaseUrl, headers });
+    if (modelProbe.ok && modelProbe.models.length && !modelProbe.models.includes(normalizedModel)) {
+      const suggestions = modelProbe.models.slice(0, 12).join("、");
+      lastResult = {
+        ok: false,
+        error: `模型「${normalizedModel}」不在接口返回的模型列表中。可用模型示例：${suggestions}`,
+        models: modelProbe.models
+      };
+      continue;
+    }
+    const result = await probeAiChatCompletion({
+      baseUrl: candidateBaseUrl,
+      apiKey,
+      model: normalizedModel,
+      headers: { ...headers }
+    });
+    if (result.ok) {
+      return { ...result, resolvedBaseUrl: candidateBaseUrl };
+    }
+    lastResult = result;
+  }
+  return lastResult;
+}
+
+async function probeAiModels({ baseUrl, headers }) {
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/models`, {
+      method: "GET",
+      headers,
+      cache: "no-store"
+    });
+  } catch {
+    return { ok: false, models: [] };
+  }
+  if (!response.ok) {
+    return { ok: false, models: [] };
+  }
+  try {
+    const payload = await response.json();
+    const models = Array.isArray(payload?.data)
+      ? payload.data.map((item) => String(item?.id || "").trim()).filter(Boolean)
+      : [];
+    return { ok: true, models };
+  } catch {
+    return { ok: false, models: [] };
+  }
 }
 
 async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
@@ -1771,13 +2049,30 @@ async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
     return { ok: false, error: `无法连接：${error?.message || error}` };
   }
 
-  if (response.ok) {
-    return { ok: true };
-  }
-
-  let detail = "";
+  let bodyText = "";
   try {
-    detail = (await response.text()).slice(0, 200);
+    bodyText = await response.text();
   } catch {}
+  if (response.ok) {
+    try {
+      const payload = bodyText ? JSON.parse(bodyText) : null;
+      if (payload?.choices || payload?.id || payload?.object) {
+        return { ok: true };
+      }
+      return { ok: false, error: "接口返回格式不是 OpenAI 兼容响应" };
+    } catch {
+      return { ok: false, error: "接口返回了网页 HTML；请检查 Base URL，通常需要以 /v1 结尾" };
+    }
+  }
+  let parsedError = null;
+  try {
+    parsedError = bodyText ? JSON.parse(bodyText) : null;
+  } catch {}
+  const errorType = String(parsedError?.error?.type || parsedError?.type || "").trim();
+  const errorMessage = String(parsedError?.error?.message || parsedError?.message || "").trim();
+  if (response.status >= 500 && errorType === "upstream_error") {
+    return { ok: false, error: "AI 代理的上游服务失败。请检查模型名、API Key、账户余额或代理服务状态；建议先从 /models 返回的模型中选择。" };
+  }
+  const detail = errorMessage || bodyText.slice(0, 200);
   return { ok: false, error: `HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
 }

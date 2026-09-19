@@ -11,6 +11,7 @@ const el = {
   copyBtn: document.getElementById("copyBtn"),
   downloadBtn: document.getElementById("downloadBtn"),
   sendBtn: document.getElementById("sendBtn"),
+  collectionBtn: document.getElementById("collectionBtn"),
   readingViewBtn: document.getElementById("readingViewBtn"),
   aiBtn: document.getElementById("aiBtn"),
   settingsBtn: document.getElementById("settingsBtn")
@@ -86,6 +87,14 @@ function bindEvents() {
       setMessage(`发送失败：${resp?.error || "未知错误"}`);
     }
     render(resp?.payload || latestPayload);
+  });
+
+  el.collectionBtn?.addEventListener("click", async () => {
+    const tab = await getActiveTab();
+    const match = String(tab?.url || "").match(/\/video\/(BV[0-9A-Za-z]+)/i);
+    const suffix = match?.[1] ? `?bvid=${encodeURIComponent(match[1])}&autorun=1` : "?autorun=1";
+    await chrome.tabs.create({ url: chrome.runtime.getURL(`batch.html${suffix}`) });
+    window.close();
   });
 
   el.readingViewBtn?.addEventListener("click", async () => {

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>合集学习笔记</title>
+  <link rel="stylesheet" href="./batch.css" />
+</head>
+<body>
+  <main class="batch-app">
+    <header class="batch-header">
+      <div>
+        <h1>合集学习笔记</h1>
+        <p>先生成每个视频，再按课程编号重置为 01 的位置切分小合集</p>
+      </div>
+      <button id="openOptionsBtn" class="secondary">设置</button>
+    </header>
+
+    <section class="card controls">
+      <label>合集入口 BV 号或视频地址
+        <div class="inline"><input id="bvidInput" type="text" placeholder="BV1gb42177hm" /><button id="discoverBtn" class="primary">读取合集</button></div>
+      </label>
+      <div class="grid">
+        <label>AI 模型<select id="providerSelect"><option value="">加载中...</option></select></label>
+        <label>Obsidian 根目录<input id="folderInput" type="text" value="Clippings/Bilibili" /></label>
+      </div>
+      <p id="obsidianStatus" class="hint">正在检查 Obsidian 连接...</p>
+      <p class="hint">会自动写入当前打开的 Obsidian 仓库，并自动建立课程和小合集目录；不需要手动创建文件夹。</p>
+    </section>
+
+    <section id="courseCard" class="card" hidden>
+      <div class="course-head"><div><h2 id="courseTitle"></h2><p id="courseMeta"></p></div><button id="runBtn" class="primary" disabled>一键全自动生成</button></div>
+      <div id="groupList" class="group-list"></div>
+    </section>
+
+    <section id="progressCard" class="card" hidden>
+      <div class="progress-row"><span id="progressText">等待开始</span><span id="progressCount"></span></div>
+      <progress id="progressBar" value="0" max="1"></progress>
+      <div class="progress-actions"><button id="pauseBtn" class="secondary">暂停</button><button id="clearCheckpointBtn" class="secondary">清除断点</button></div>
+      <pre id="log"></pre>
+    </section>
+
+    <section id="failedCard" class="card" hidden>
+      <h2>失败清单</h2>
+      <p class="hint">没有字幕或 AI/网络失败的视频会列在这里，不会阻塞其他视频。</p>
+      <div id="failedList"></div>
+    </section>
+  </main>
+  <script src="./batch.js"></script>
+</body>
+</html>

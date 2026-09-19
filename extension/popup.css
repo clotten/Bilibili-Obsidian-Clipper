@@ -211,6 +211,17 @@ body {
   cursor: pointer;
 }
 
+.collection {
+  border: 1px solid #4f8cff;
+  background: #eef5ff;
+  border-radius: 9px;
+  padding: 7px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #2864c7;
+  cursor: pointer;
+}
+
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
