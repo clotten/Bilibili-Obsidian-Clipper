@@ -131,6 +131,8 @@ Clippings/Bilibili/课程名/
 
 批量生成过程中点击“暂停”会取消当前 AI 请求，并在当前步骤收尾后停止，不会继续处理下一个视频或小合集。
 
+批量页面读取合集后默认不会自动开始。可以勾选要处理的小合集，点击“开始生成”；暂停后点击“开始/继续生成”即可从断点继续。
+
 ## 视频教程
 
 - [B 站教程](https://www.bilibili.com/video/BV15qQwB4EZ9/?spm_id_from=333.1387.homepage.video_card.click&vd_source=040bc5ea7866b419558ec2682a2ccb59)

@@ -30,13 +30,18 @@
 
     <section id="courseCard" class="card" hidden>
       <div class="course-head"><div><h2 id="courseTitle"></h2><p id="courseMeta"></p></div><button id="runBtn" class="primary" disabled>一键全自动生成</button></div>
+      <div class="group-actions">
+        <span>选择要生成的小合集：</span>
+        <button id="selectAllGroupsBtn" class="secondary" type="button">全选</button>
+        <button id="selectNoGroupsBtn" class="secondary" type="button">全不选</button>
+      </div>
       <div id="groupList" class="group-list"></div>
     </section>
 
     <section id="progressCard" class="card" hidden>
       <div class="progress-row"><span id="progressText">等待开始</span><span id="progressCount"></span></div>
       <progress id="progressBar" value="0" max="1"></progress>
-      <div class="progress-actions"><button id="pauseBtn" class="secondary">暂停</button><button id="clearCheckpointBtn" class="secondary">清除断点</button></div>
+      <div class="progress-actions"><button id="startBtn" class="primary" type="button">开始生成</button><button id="pauseBtn" class="secondary" type="button">暂停</button><button id="clearCheckpointBtn" class="secondary" type="button">清除断点</button></div>
       <pre id="log"></pre>
     </section>
 

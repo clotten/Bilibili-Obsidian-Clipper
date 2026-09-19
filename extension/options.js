@@ -67,7 +67,8 @@ const MAX_NOTE_PLACEHOLDER_SECTIONS = 5;
 
 const AI_PRESETS = [
   { id: "openai_compat", name: "OpenAI 兼容", baseUrl: "https://api.openai.com/v1", requiresKey: true },
-  { id: "deepseek",      name: "DeepSeek",    baseUrl: "https://api.deepseek.com/v1", requiresKey: true },
+  { id: "deepseek",      name: "DeepSeek",    baseUrl: "https://api.deepseek.com/v1", defaultModel: "deepseek-chat", requiresKey: true },
+  { id: "deepseek_openai_next", name: "DeepSeek（OpenAI Next 中转）", baseUrl: "https://api.openai-next.com/v1", defaultModel: "deepseek-v4-flash", requiresKey: true },
   { id: "zhipu",         name: "智谱 GLM",    baseUrl: "https://open.bigmodel.cn/api/paas/v4", requiresKey: true },
   { id: "minimax",       name: "MiniMax",     baseUrl: "https://api.minimaxi.com/v1", requiresKey: true },
   { id: "moonshot",      name: "Moonshot",    baseUrl: "https://api.moonshot.cn/v1", requiresKey: true },
@@ -986,6 +987,10 @@ function addAiProviderRow(item = {}) {
     const currentBaseUrl = baseUrlInput.value.trim();
     if (!currentBaseUrl || (previousPreset && currentBaseUrl === previousPreset.baseUrl)) {
       baseUrlInput.value = next.baseUrl;
+    }
+    const modelInput = row.querySelector(".ai-provider-model");
+    if (!modelInput.value.trim() || (previousPreset?.defaultModel && modelInput.value.trim() === previousPreset.defaultModel)) {
+      modelInput.value = next.defaultModel || "";
     }
     const apikeyInput = row.querySelector(".ai-provider-apikey");
     apikeyInput.placeholder = row.dataset.hasSavedKey === "1"

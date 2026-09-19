@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const state = { course: null, groups: [], providerId: "", folder: "Clippings/Bilibili", settings: {}, autorun: false, running: false, paused: false, current: 0, activeRequestId: "", completed: {}, summaries: {}, failed: [] };
+const state = { course: null, groups: [], providerId: "", folder: "Clippings/Bilibili", settings: {}, autorun: false, running: false, paused: false, current: 0, runTotal: 0, activeRequestId: "", completed: {}, summaries: {}, failed: [] };
 
 init().catch((error) => log(`初始化失败：${error.message}`));
 
@@ -14,13 +14,16 @@ async function init() {
   await checkObsidianConnection();
   await loadProviders();
   if (bvid) await discover();
-  if (state.autorun && state.course && state.providerId) await run();
+  if (state.course && state.providerId) log("合集已读取，请选择小合集后点击“开始生成”。");
 }
 
 function bindEvents() {
   $("discoverBtn").addEventListener("click", discover);
   $("runBtn").addEventListener("click", run);
-  $("pauseBtn").addEventListener("click", () => { state.paused = true; state.running = false; $("pauseBtn").disabled = true; setRunButton(false); cancelActiveBatchRequest(); log("正在暂停：取消当前 AI 请求，完成收尾后停止。"); });
+  $("startBtn").addEventListener("click", run);
+  $("selectAllGroupsBtn").addEventListener("click", () => { state.groups.forEach((group) => { group.selected = true; }); renderCourse(); });
+  $("selectNoGroupsBtn").addEventListener("click", () => { state.groups.forEach((group) => { group.selected = false; }); renderCourse(); });
+  $("pauseBtn").addEventListener("click", () => { state.paused = true; state.running = false; $("pauseBtn").disabled = true; setRunButton(false); setStartButton(false); cancelActiveBatchRequest(); log("正在暂停：取消当前 AI 请求，完成收尾后停止。"); });
   $("clearCheckpointBtn").addEventListener("click", async () => { if (!state.course) return; await chrome.storage.local.remove(checkpointKey(state.course.bvid)); state.completed = {}; state.summaries = {}; state.failed = []; renderFailed(); log("已清除当前合集断点。"); });
   $("openOptionsBtn").addEventListener("click", () => runtime({ type: "open-options" }));
 }
@@ -55,7 +58,7 @@ function makeGroups(pages) {
     if (!current || (number === 1 && current.pages.length > 0)) {
       const order = groups.length + 1;
       const label = inferGroupName(page.title, order);
-      current = { key: `group-${String(order).padStart(2, "0")}`, name: label, pages: [] };
+      current = { key: `group-${String(order).padStart(2, "0")}`, name: label, pages: [], selected: true };
       groups.push(current);
     }
     current.pages.push(page);
@@ -83,15 +86,19 @@ function renderCourse() {
   $("courseCard").hidden = false; $("runBtn").disabled = !state.providerId;
   $("courseTitle").textContent = state.course.title || "B 站合集";
   $("courseMeta").textContent = `${state.course.pages.length} 个视频 · ${state.groups.length} 个自动分组 · 作者：${state.course.author || "未知"}`;
-  $("groupList").innerHTML = state.groups.map((group, index) => `<div class="group-row"><span>${index + 1}</span><input data-group="${escapeHtml(group.key)}" value="${escapeHtml(group.name)}" /><small>${group.pages.length} 个视频：${escapeHtml(group.pages.slice(0, 2).map((p) => p.title).join("、"))}${group.pages.length > 2 ? "…" : ""}</small></div>`).join("");
+  $("groupList").innerHTML = state.groups.map((group, index) => `<div class="group-row"><label class="group-select" title="选择此小合集"><input type="checkbox" data-group-select="${escapeHtml(group.key)}" ${group.selected !== false ? "checked" : ""} /></label><span>${index + 1}</span><input data-group="${escapeHtml(group.key)}" value="${escapeHtml(group.name)}" /><small>${group.pages.length} 个视频：${escapeHtml(group.pages.slice(0, 2).map((p) => p.title).join("、"))}${group.pages.length > 2 ? "…" : ""}</small></div>`).join("");
+  $("groupList").querySelectorAll("input[data-group-select]").forEach((input) => input.addEventListener("change", () => { const group = state.groups.find((item) => item.key === input.dataset.groupSelect); if (group) group.selected = input.checked; }));
   $("groupList").querySelectorAll("input").forEach((input) => input.addEventListener("change", () => { const group = state.groups.find((item) => item.key === input.dataset.group); if (group) group.name = input.value.trim() || group.key; }));
 }
 
 async function run() {
   if (!state.course || !state.providerId || state.running) return;
   state.folder = $("folderInput").value.trim().replace(/\/+$/g, "") || "Clippings/Bilibili";
+  const selectedGroups = state.groups.filter((group) => group.selected !== false);
+  if (!selectedGroups.length) { log("请至少选择一个小合集。没有选择的小合集不会生成，也不会调用 AI。"); return; }
   state.paused = false;
   state.running = true;
+  setStartButton(true);
   $("progressCard").hidden = false;
   $("pauseBtn").disabled = true;
   setRunButton(true);
@@ -106,12 +113,13 @@ async function run() {
   if (!aiReady?.ok) { log(`AI 配置不可用，任务已停止：${aiReady?.error || "未知错误"}`); finishRun(); return; }
   log("AI 连接正常，开始处理合集。");
   $("pauseBtn").disabled = false;
-  const all = state.course.pages; $("progressBar").max = all.length; $("progressBar").value = Object.keys(state.completed).length;
+  const all = selectedGroups.flatMap((group) => group.pages); state.runTotal = all.length; $("progressBar").max = all.length; $("progressBar").value = Math.min(Object.keys(state.completed).length, all.length);
   for (let index = 0; index < all.length; index += 1) { if (!state.running || state.paused) break; const page = all[index]; state.current = index + 1; if (state.completed[page.cid] && state.summaries[page.cid]?.summary && state.summaries[page.cid]?.hasSubtitle) { updateProgress(index + 1, `跳过已完成：${page.title}`); continue; } try { await processPage(page, index + 1); } catch (error) { addFailed(page, error?.message || "处理失败"); } await saveCheckpoint(); }
   if (state.running && !state.paused) { await buildAggregates(); state.running = false; log(`全部处理完成。笔记已自动写入当前 Obsidian 仓库：${state.folder}/${sanitize(state.course.title)}`); }
   else if (state.paused) log("已暂停，点击“开始生成”可继续。");
   setRunButton(false);
   $("pauseBtn").disabled = true;
+  setStartButton(false);
   renderFailed();
 }
 
@@ -120,6 +128,7 @@ function finishRun() {
   state.paused = false;
   setRunButton(false);
   $("pauseBtn").disabled = true;
+  setStartButton(false);
 }
 
 function setRunButton(busy) {
@@ -127,6 +136,8 @@ function setRunButton(busy) {
   button.disabled = busy || !state.providerId;
   button.textContent = busy ? "处理中..." : "一键全自动生成";
 }
+
+function setStartButton(busy) { const button = $("startBtn"); if (!button) return; button.disabled = busy; button.textContent = busy ? "生成中…" : "开始/继续生成"; }
 
 async function processPage(page, number) {
   const group = groupFor(page);
@@ -167,7 +178,7 @@ async function processPage(page, number) {
 }
 
 async function buildAggregates() {
-  for (const group of state.groups) {
+  for (const group of state.groups.filter((item) => item.selected !== false)) {
     if (!state.running || state.paused) break;
     const items = group.pages.map((page) => state.summaries[page.cid]).filter(Boolean);
     if (!items.length) continue;
@@ -217,7 +228,7 @@ function videoFileName(page) { const order = Number(page.index || page.page || 0
 function addFailed(page, reason) { const key = `${page.cid || page.title}`; if (!state.failed.some((item) => item.key === key)) state.failed.push({ key, title: page.title, page: page.page, url: page.url, reason: String(reason) }); log(`失败：${page.title}（${reason}）`); }
 function removeFailed(page) { const key = `${page.cid || page.title}`; state.failed = state.failed.filter((item) => item.key !== key); }
 function renderFailed() { $("failedCard").hidden = !state.failed.length; $("failedList").innerHTML = state.failed.map((item) => `<div class="failed-item"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.reason)}${item.url ? ` · <a href="${escapeHtml(item.url)}" target="_blank">打开视频</a>` : ""}</span></div>`).join(""); }
-function updateProgress(value, text) { $("progressBar").value = value; $("progressText").textContent = text; $("progressCount").textContent = `${Math.min(value, state.course?.pages.length || value)}/${state.course?.pages.length || value}`; }
+function updateProgress(value, text) { const total = state.runTotal || state.course?.pages.length || value; $("progressBar").value = Math.min(value, total); $("progressText").textContent = text; $("progressCount").textContent = `${Math.min(value, total)}/${total}`; }
 function setBusy(value) { $("discoverBtn").disabled = value; $("bvidInput").disabled = value; }
 function log(text) { $("log").textContent += `${new Date().toLocaleTimeString()} ${text}\n`; $("log").scrollTop = $("log").scrollHeight; }
 async function saveCheckpoint() { if (!state.course) return; await chrome.storage.local.set({ [checkpointKey(state.course.bvid)]: { courseTitle: state.course.title, completed: state.completed, summaries: state.summaries, failed: state.failed, updatedAt: Date.now() } }); }

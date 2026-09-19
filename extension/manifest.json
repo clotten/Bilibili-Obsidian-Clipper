@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bilibili Obsidian Clipper｜一键保存B站字幕",
-  "version": "1.2.13",
+  "version": "1.2.14",
   "description": "抓取 B 站视频字幕，支持按合集批量生成 Obsidian 学习笔记。",
   
   "browser_specific_settings": {

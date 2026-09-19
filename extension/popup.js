@@ -92,7 +92,7 @@ function bindEvents() {
   el.collectionBtn?.addEventListener("click", async () => {
     const tab = await getActiveTab();
     const match = String(tab?.url || "").match(/\/video\/(BV[0-9A-Za-z]+)/i);
-    const suffix = match?.[1] ? `?bvid=${encodeURIComponent(match[1])}&autorun=1` : "?autorun=1";
+    const suffix = match?.[1] ? `?bvid=${encodeURIComponent(match[1])}` : "";
     await chrome.tabs.create({ url: chrome.runtime.getURL(`batch.html${suffix}`) });
     window.close();
   });
