@@ -1094,12 +1094,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "batch-ai-preflight") {
-    runBatchAiCompletion({
-      providerId: message.providerId,
-      systemPrompt: "这是连接测试。",
-      prompt: "只回复 OK"
-    })
-      .then(() => sendResponse({ ok: true }))
+    Promise.resolve()
+      .then(async () => {
+        const providers = await loadAiProviders();
+        const provider = providers.find((item) => item.id === String(message.providerId || ""));
+        if (!provider) {
+          return { ok: false, error: "未找到所选 AI 平台" };
+        }
+        const keys = await loadAiProviderKeys();
+        const apiKey = String(keys[provider.id] || "").trim();
+        if (provider.requiresKey !== false && !apiKey) {
+          return { ok: false, error: "所选 AI 平台尚未填写 API Key" };
+        }
+        return testAiConnection({
+          baseUrl: provider.baseUrl,
+          apiKey,
+          model: provider.model
+        });
+      })
+      .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }

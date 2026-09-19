@@ -20,7 +20,7 @@ async function init() {
 function bindEvents() {
   $("discoverBtn").addEventListener("click", discover);
   $("runBtn").addEventListener("click", run);
-  $("pauseBtn").addEventListener("click", () => { state.paused = true; state.running = false; $("pauseBtn").disabled = true; log("已暂停，可稍后点击开始生成继续。"); });
+  $("pauseBtn").addEventListener("click", () => { state.paused = true; state.running = false; $("pauseBtn").disabled = true; setRunButton(false); log("已暂停，可稍后点击开始生成继续。"); });
   $("clearCheckpointBtn").addEventListener("click", async () => { if (!state.course) return; await chrome.storage.local.remove(checkpointKey(state.course.bvid)); state.completed = {}; state.summaries = {}; state.failed = []; renderFailed(); log("已清除当前合集断点。"); });
   $("openOptionsBtn").addEventListener("click", () => runtime({ type: "open-options" }));
 }
@@ -89,17 +89,43 @@ function renderCourse() {
 
 async function run() {
   if (!state.course || !state.providerId || state.running) return;
-  if (!(await checkObsidianConnection())) { log("无法开始：请保持 Obsidian 打开，并完成 Local REST API 配置。"); return; }
+  state.folder = $("folderInput").value.trim().replace(/\/+$/g, "") || "Clippings/Bilibili";
+  state.paused = false;
+  state.running = true;
+  $("progressCard").hidden = false;
+  $("pauseBtn").disabled = true;
+  setRunButton(true);
+  updateProgress(Object.keys(state.completed).length, "正在检查 Obsidian 连接...");
+  if (!(await checkObsidianConnection())) { log("无法开始：请保持 Obsidian 打开，并完成 Local REST API 配置。"); finishRun(); return; }
+  updateProgress(Object.keys(state.completed).length, "正在检查 AI 配置...");
   log("正在测试 AI 模型和接口地址...");
-  const aiReady = await runtime({ type: "batch-ai-preflight", providerId: state.providerId }).catch((error) => ({ ok: false, error: error.message }));
-  if (!aiReady?.ok) { log(`AI 配置不可用，任务已停止：${aiReady?.error || "未知错误"}`); return; }
+  const aiReady = await Promise.race([
+    runtime({ type: "batch-ai-preflight", providerId: state.providerId }),
+    new Promise((resolve) => window.setTimeout(() => resolve({ ok: false, error: "AI 连接测试超过 30 秒，请检查接口状态后重试" }), 30000))
+  ]).catch((error) => ({ ok: false, error: error.message }));
+  if (!aiReady?.ok) { log(`AI 配置不可用，任务已停止：${aiReady?.error || "未知错误"}`); finishRun(); return; }
   log("AI 连接正常，开始处理合集。");
-  state.folder = $("folderInput").value.trim().replace(/\/+$/g, "") || "Clippings/Bilibili"; state.paused = false; state.running = true; $("progressCard").hidden = false; $("pauseBtn").disabled = false;
+  $("pauseBtn").disabled = false;
   const all = state.course.pages; $("progressBar").max = all.length; $("progressBar").value = Object.keys(state.completed).length;
   for (let index = 0; index < all.length; index += 1) { if (!state.running || state.paused) break; const page = all[index]; state.current = index + 1; if (state.completed[page.cid] && state.summaries[page.cid]?.summary) { updateProgress(index + 1, `跳过已完成：${page.title}`); continue; } try { await processPage(page, index + 1); } catch (error) { addFailed(page, error?.message || "处理失败"); } await saveCheckpoint(); }
   if (state.running && !state.paused) { await buildAggregates(); state.running = false; log(`全部处理完成。笔记已自动写入当前 Obsidian 仓库：${state.folder}/${sanitize(state.course.title)}`); }
   else if (state.paused) log("已暂停，点击“开始生成”可继续。");
+  setRunButton(false);
+  $("pauseBtn").disabled = true;
   renderFailed();
+}
+
+function finishRun() {
+  state.running = false;
+  state.paused = false;
+  setRunButton(false);
+  $("pauseBtn").disabled = true;
+}
+
+function setRunButton(busy) {
+  const button = $("runBtn");
+  button.disabled = busy || !state.providerId;
+  button.textContent = busy ? "处理中..." : "一键全自动生成";
 }
 
 async function processPage(page, number) {
