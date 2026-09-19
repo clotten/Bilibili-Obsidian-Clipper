@@ -68,12 +68,14 @@ const DEFAULT_SYNC_SETTINGS = {
 const DEFAULT_LOCAL_SETTINGS = {
   obsidianApiKey: ""
 };
+const OPENAI_NEXT_LEGACY_BASE_URL = "https://api.openai-next.com";
+const OPENAI_NEXT_BASE_URL = `${OPENAI_NEXT_LEGACY_BASE_URL}/v1`;
 const DEFAULT_AI_PROVIDERS = [
   {
     id: "p_openai_next_default",
     presetId: "openai_compat",
     name: "OpenAI 兼容",
-    baseUrl: "https://api.openai-next.com",
+    baseUrl: OPENAI_NEXT_BASE_URL,
     model: "o4-mini-high",
     temperature: 0.7,
     requiresKey: true,
@@ -971,78 +973,65 @@ async function runBatchAiCompletion({ providerId, systemPrompt, prompt }) {
   if (apiKey) {
     headers.Authorization = `Bearer ${apiKey}`;
   }
-  const baseUrl = String(provider.baseUrl || "").trim().replace(/\/+$/, "");
-  const endpoints = [`${baseUrl}/chat/completions`];
-  if (!/\/v1$/i.test(baseUrl)) {
-    endpoints.push(`${baseUrl}/v1/chat/completions`);
+  const endpoint = buildChatCompletionsEndpoint(provider.baseUrl);
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildChatCompletionBody({
+        model: provider.model,
+        stream: true,
+        temperature: provider.temperature,
+        messages: [
+          { role: "system", content: String(systemPrompt || "") },
+          { role: "user", content: String(prompt || "") }
+        ]
+      }))
+    });
+  } catch (error) {
+    throw new Error(`AI 网络请求失败：${error?.message || error}`);
   }
-  let lastError = null;
-  for (const endpoint of [...new Set(endpoints)]) {
-    let response;
-    try {
-      response = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: provider.model,
-          stream: true,
-          temperature: typeof provider.temperature === "number" ? provider.temperature : 0.7,
-          messages: [
-            { role: "system", content: String(systemPrompt || "") },
-            { role: "user", content: String(prompt || "") }
-          ]
-        })
-      });
-    } catch (error) {
-      lastError = new Error(`AI 网络请求失败：${error?.message || error}`);
-      continue;
-    }
-    if (!response.ok) {
-      const responseText = await response.text().catch(() => "");
-      let payload = null;
-      try {
-        payload = responseText ? JSON.parse(responseText) : null;
-      } catch {}
-      const detail = String(payload?.error?.message || payload?.message || responseText || "").slice(0, 300);
-      lastError = new Error(`AI 请求失败：HTTP ${response.status}${detail ? ` ${detail}` : ""}`);
-      if (response.status === 404) continue;
-      throw lastError;
-    }
-    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-    if (contentType.includes("text/html")) {
-      await response.text().catch(() => "");
-      lastError = new Error(`AI 地址返回了网页 HTML：${endpoint}`);
-      continue;
-    }
-    if (contentType.includes("text/event-stream")) {
-      let content = "";
-      try {
-        for await (const token of parseOpenAISSE(response)) {
-          content += token;
-        }
-      } catch (error) {
-        lastError = new Error(`AI 流式响应解析失败：${error?.message || error}`);
-        continue;
-      }
-      if (content.trim()) {
-        return content.trim();
-      }
-      lastError = new Error(`AI 返回了空的流式内容：${endpoint}`);
-      continue;
-    }
+  if (!response.ok) {
     const responseText = await response.text().catch(() => "");
+    let payload = null;
     try {
-      const payload = responseText ? JSON.parse(responseText) : null;
-      const content = payload?.choices?.[0]?.message?.content;
-      if (typeof content === "string" && content.trim()) {
-        return content.trim();
-      }
-      lastError = new Error(`AI 返回格式不兼容：${endpoint}`);
-    } catch {
-      lastError = new Error(`AI 地址返回了非 JSON 内容：${endpoint}`);
-    }
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {}
+    const detail = String(payload?.error?.message || payload?.message || responseText || "").slice(0, 300);
+    throw new Error(`AI 请求失败：HTTP ${response.status}${detail ? ` ${detail}` : ""}（接口：${endpoint}）`);
   }
-  throw lastError || new Error("AI 请求失败：没有可用的 Chat Completions 地址");
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (contentType.includes("text/html")) {
+    await response.text().catch(() => "");
+    throw new Error(`AI 地址返回了网页 HTML：${endpoint}`);
+  }
+  if (contentType.includes("text/event-stream")) {
+    let content = "";
+    try {
+      for await (const token of parseOpenAISSE(response)) {
+        content += token;
+      }
+    } catch (error) {
+      throw new Error(`AI 流式响应解析失败：${error?.message || error}`);
+    }
+    if (content.trim()) {
+      return content.trim();
+    }
+    throw new Error(`AI 返回了空的流式内容：${endpoint}`);
+  }
+  const responseText = await response.text().catch(() => "");
+  try {
+    const payload = responseText ? JSON.parse(responseText) : null;
+    const content = payload?.choices?.[0]?.message?.content;
+    if (typeof content === "string" && content.trim()) {
+      return content.trim();
+    }
+    throw new Error(`AI 返回格式不兼容：${endpoint}`);
+  } catch (error) {
+    if (String(error?.message || "").startsWith("AI 返回格式不兼容")) throw error;
+    throw new Error(`AI 地址返回了非 JSON 内容：${endpoint}`);
+  }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -1552,9 +1541,10 @@ async function initializeSettingsStorage() {
     aiProviders: DEFAULT_AI_PROVIDERS
   });
   const localCurrent = await chrome.storage.local.get(DEFAULT_LOCAL_SETTINGS);
-  const aiProviders = Array.isArray(syncCurrent.aiProviders) && syncCurrent.aiProviders.length
+  const rawAiProviders = Array.isArray(syncCurrent.aiProviders) && syncCurrent.aiProviders.length
     ? syncCurrent.aiProviders
     : DEFAULT_AI_PROVIDERS;
+  const aiProviders = rawAiProviders.map(normalizeAiProvider).filter(Boolean);
 
   await chrome.storage.sync.set({ ...DEFAULT_SYNC_SETTINGS, ...syncCurrent, aiProviders });
   await chrome.storage.local.set({
@@ -1796,7 +1786,7 @@ function normalizeAiProvider(item) {
     id,
     presetId: String(item.presetId || "custom"),
     name: String(item.name || "自定义").trim() || "自定义",
-    baseUrl: String(item.baseUrl || "").trim().replace(/\/+$/, ""),
+    baseUrl: normalizeAiBaseUrl(item.baseUrl),
     model: String(item.model || "").trim(),
     temperature: typeof item.temperature === "number" ? item.temperature : 0.7,
     requiresKey: item.requiresKey !== false,
@@ -1941,7 +1931,7 @@ async function* parseOpenAISSE(response) {
 
 async function streamChat({ provider, context, userPrompt, history, port, signal, getAbortMeta, onFirstToken }) {
   if (!port) return;
-  const baseUrl = String(provider?.baseUrl || "").trim().replace(/\/+$/, "");
+  const baseUrl = normalizeAiBaseUrl(provider?.baseUrl);
   if (!baseUrl) {
     port.postMessage({ type: "error", error: "baseUrl 未配置" });
     return;
@@ -1965,16 +1955,16 @@ async function streamChat({ provider, context, userPrompt, history, port, signal
 
   let response;
   try {
-    response = await fetch(`${baseUrl}/chat/completions`, {
+    response = await fetch(buildChatCompletionsEndpoint(baseUrl), {
       method: "POST",
       headers,
       signal,
-      body: JSON.stringify({
+      body: JSON.stringify(buildChatCompletionBody({
         model: provider.model,
         messages,
         stream: true,
-        temperature: typeof provider.temperature === "number" ? provider.temperature : 0.7
-      })
+        temperature: provider.temperature
+      }))
     });
   } catch (e) {
     port.postMessage({ type: "error", error: `网络错误：${e?.message || e}` });
@@ -2016,7 +2006,7 @@ async function streamChat({ provider, context, userPrompt, history, port, signal
 }
 
 async function testAiConnection({ baseUrl, apiKey, model }) {
-  const normalizedBaseUrl = String(baseUrl || "").trim().replace(/\/+$/, "");
+  const normalizedBaseUrl = normalizeAiBaseUrl(baseUrl);
   const normalizedModel = String(model || "").trim();
   if (!normalizedBaseUrl) {
     return { ok: false, error: "请填写 baseUrl" };
@@ -2047,16 +2037,14 @@ async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
 
   let response;
   try {
-    response = await fetch(`${baseUrl}/chat/completions`, {
+    response = await fetch(buildChatCompletionsEndpoint(baseUrl), {
       method: "POST",
       headers: requestHeaders,
-      body: JSON.stringify({
+      body: JSON.stringify(buildChatCompletionBody({
         model,
         stream: false,
-        temperature: 0,
-        max_tokens: 1,
-        messages: [{ role: "user", content: "ping" }]
-      })
+        messages: [{ role: "user", content: "只回复 OK" }]
+      }))
     });
   } catch (error) {
     return { ok: false, error: `无法连接：${error?.message || error}` };
@@ -2070,4 +2058,37 @@ async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
     detail = (await response.text()).slice(0, 200);
   } catch {}
   return { ok: false, error: `HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
+}
+
+function normalizeAiBaseUrl(value) {
+  let baseUrl = String(value || "").trim().replace(/\/+$/, "");
+  baseUrl = baseUrl.replace(/\/chat\/completions$/i, "").replace(/\/+$/, "");
+  if (baseUrl.toLowerCase() === OPENAI_NEXT_LEGACY_BASE_URL) {
+    return OPENAI_NEXT_BASE_URL;
+  }
+  return baseUrl;
+}
+
+function buildChatCompletionsEndpoint(baseUrl) {
+  const normalized = normalizeAiBaseUrl(baseUrl);
+  if (!normalized) {
+    throw new Error("baseUrl 未配置");
+  }
+  return `${normalized}/chat/completions`;
+}
+
+function isReasoningModel(model) {
+  return /^(?:o[1-9](?:[-.]|$)|gpt-5(?:[-.]|$))/i.test(String(model || "").trim());
+}
+
+function buildChatCompletionBody({ model, messages, stream, temperature }) {
+  const body = {
+    model: String(model || "").trim(),
+    messages: Array.isArray(messages) ? messages : [],
+    stream: stream === true
+  };
+  if (!isReasoningModel(body.model)) {
+    body.temperature = typeof temperature === "number" ? temperature : 0.7;
+  }
+  return body;
 }
