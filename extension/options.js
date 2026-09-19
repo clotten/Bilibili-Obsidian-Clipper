@@ -1027,9 +1027,7 @@ function addAiProviderRow(item = {}) {
       model
     });
     if (resp?.ok) {
-      const resolved = String(resp.resolvedBaseUrl || "").trim();
-      const autoSuffix = resolved && resolved !== baseUrl.replace(/\/+$/, "") ? `（自动使用 ${resolved}）` : "";
-      showAiProviderStatus(statusNode, `连接成功${autoSuffix}`);
+      showAiProviderStatus(statusNode, "连接成功");
     } else {
       showAiProviderStatus(statusNode, `失败：${resp?.error || "未知错误"}`, true);
     }

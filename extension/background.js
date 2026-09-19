@@ -1994,59 +1994,12 @@ async function testAiConnection({ baseUrl, apiKey, model }) {
     headers["Authorization"] = `Bearer ${apiKey}`;
   }
 
-  const baseCandidates = [normalizedBaseUrl];
-  if (!/\/v1$/i.test(normalizedBaseUrl)) {
-    baseCandidates.push(`${normalizedBaseUrl}/v1`);
-  }
-  let lastResult = { ok: false, error: "没有找到可用的 OpenAI 兼容接口" };
-  for (const candidateBaseUrl of [...new Set(baseCandidates)]) {
-    const modelProbe = await probeAiModels({ baseUrl: candidateBaseUrl, headers });
-    const result = await probeAiChatCompletion({
-      baseUrl: candidateBaseUrl,
-      apiKey,
-      model: normalizedModel,
-      headers: { ...headers }
-    });
-    if (result.ok) {
-      return { ...result, resolvedBaseUrl: candidateBaseUrl };
-    }
-    if (modelProbe.ok && modelProbe.models.length && !modelProbe.models.includes(normalizedModel)) {
-      const suggestions = modelProbe.models.slice(0, 12).join("、");
-      lastResult = {
-        ...result,
-        error: `${result.error}；接口模型列表未包含「${normalizedModel}」，可用模型示例：${suggestions}`,
-        models: modelProbe.models
-      };
-    } else {
-      lastResult = result;
-    }
-  }
-  return lastResult;
-}
-
-async function probeAiModels({ baseUrl, headers }) {
-  let response;
-  try {
-    response = await fetch(`${baseUrl}/models`, {
-      method: "GET",
-      headers,
-      cache: "no-store"
-    });
-  } catch {
-    return { ok: false, models: [] };
-  }
-  if (!response.ok) {
-    return { ok: false, models: [] };
-  }
-  try {
-    const payload = await response.json();
-    const models = Array.isArray(payload?.data)
-      ? payload.data.map((item) => String(item?.id || "").trim()).filter(Boolean)
-      : [];
-    return { ok: true, models };
-  } catch {
-    return { ok: false, models: [] };
-  }
+  return probeAiChatCompletion({
+    baseUrl: normalizedBaseUrl,
+    apiKey,
+    model: normalizedModel,
+    headers
+  });
 }
 
 async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
@@ -2063,7 +2016,9 @@ async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
       headers: requestHeaders,
       body: JSON.stringify({
         model,
-        stream: true,
+        stream: false,
+        temperature: 0,
+        max_tokens: 1,
         messages: [{ role: "user", content: "ping" }]
       })
     });
@@ -2072,36 +2027,11 @@ async function probeAiChatCompletion({ baseUrl, apiKey, model, headers }) {
   }
 
   if (response.ok) {
-    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-    if (contentType.includes("text/event-stream")) {
-      try {
-        for await (const _token of parseOpenAISSE(response)) {
-          // 测试请求只验证流式协议可正常读取。
-        }
-        return { ok: true };
-      } catch (error) {
-        return { ok: false, error: `流式响应解析失败：${error?.message || error}` };
-      }
-    }
-    const bodyText = await response.text().catch(() => "");
-    try {
-      const payload = bodyText ? JSON.parse(bodyText) : null;
-      if (payload?.choices || payload?.id || payload?.object) return { ok: true };
-      return { ok: false, error: "接口返回格式不是 OpenAI 兼容响应" };
-    } catch {
-      return { ok: false, error: "接口返回了网页 HTML；正在尝试兼容的 /v1 路径" };
-    }
+    return { ok: true };
   }
-  const bodyText = await response.text().catch(() => "");
-  let parsedError = null;
+  let detail = "";
   try {
-    parsedError = bodyText ? JSON.parse(bodyText) : null;
+    detail = (await response.text()).slice(0, 200);
   } catch {}
-  const errorType = String(parsedError?.error?.type || parsedError?.type || "").trim();
-  const errorMessage = String(parsedError?.error?.message || parsedError?.message || "").trim();
-  if (response.status >= 500 && errorType === "upstream_error") {
-    return { ok: false, error: "AI 代理的上游服务失败。请检查模型名、API Key、账户余额或代理服务状态；建议先从 /models 返回的模型中选择。" };
-  }
-  const detail = errorMessage || bodyText.slice(0, 200);
   return { ok: false, error: `HTTP ${response.status}${detail ? `: ${detail}` : ""}` };
 }
