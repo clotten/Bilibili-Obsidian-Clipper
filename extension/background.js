@@ -68,6 +68,18 @@ const DEFAULT_SYNC_SETTINGS = {
 const DEFAULT_LOCAL_SETTINGS = {
   obsidianApiKey: ""
 };
+const DEFAULT_AI_PROVIDERS = [
+  {
+    id: "p_openai_next_default",
+    presetId: "openai_compat",
+    name: "OpenAI 兼容",
+    baseUrl: "https://api.openai-next.com",
+    model: "o4-mini-high",
+    temperature: 0.7,
+    requiresKey: true,
+    enabled: true
+  }
+];
 const EXPECTED_CONTENT_SCRIPT_VERSION = chrome.runtime.getManifest().version || "";
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -1522,10 +1534,16 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 async function initializeSettingsStorage() {
-  const syncCurrent = await chrome.storage.sync.get(DEFAULT_SYNC_SETTINGS);
+  const syncCurrent = await chrome.storage.sync.get({
+    ...DEFAULT_SYNC_SETTINGS,
+    aiProviders: DEFAULT_AI_PROVIDERS
+  });
   const localCurrent = await chrome.storage.local.get(DEFAULT_LOCAL_SETTINGS);
+  const aiProviders = Array.isArray(syncCurrent.aiProviders) && syncCurrent.aiProviders.length
+    ? syncCurrent.aiProviders
+    : DEFAULT_AI_PROVIDERS;
 
-  await chrome.storage.sync.set({ ...DEFAULT_SYNC_SETTINGS, ...syncCurrent });
+  await chrome.storage.sync.set({ ...DEFAULT_SYNC_SETTINGS, ...syncCurrent, aiProviders });
   await chrome.storage.local.set({
     obsidianApiKey: normalizeApiKey(localCurrent.obsidianApiKey)
   });
@@ -1778,7 +1796,12 @@ async function loadAiProviders() {
     chrome.storage.sync.get(["aiProviders"]),
     loadAiProviderKeys()
   ]);
-  const list = Array.isArray(syncData.aiProviders) ? syncData.aiProviders : [];
+  const list = Array.isArray(syncData.aiProviders) && syncData.aiProviders.length
+    ? syncData.aiProviders
+    : DEFAULT_AI_PROVIDERS;
+  if (!Array.isArray(syncData.aiProviders) || syncData.aiProviders.length === 0) {
+    await chrome.storage.sync.set({ aiProviders: list });
+  }
   return list
     .map(normalizeAiProvider)
     .filter(Boolean)
