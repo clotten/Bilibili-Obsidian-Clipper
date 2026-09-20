@@ -11,7 +11,7 @@
     <header class="batch-header">
       <div>
         <h1>合集学习笔记</h1>
-        <p>先生成每个视频，再按课程编号重置为 01 的位置切分小合集</p>
+        <p>AI 提供标题分组建议，人工确认后分别生成视频笔记和小合集教程</p>
       </div>
       <button id="openOptionsBtn" class="secondary">设置</button>
     </header>
@@ -29,19 +29,26 @@
     </section>
 
     <section id="courseCard" class="card" hidden>
-      <div class="course-head"><div><h2 id="courseTitle"></h2><p id="courseMeta"></p></div><button id="runBtn" class="primary" disabled>一键全自动生成</button></div>
+      <div class="course-head"><div><h2 id="courseTitle"></h2><p id="courseMeta"></p></div><div class="course-actions"><button id="aiGroupBtn" class="secondary" type="button">AI 分组建议</button><button id="addGroupBtn" class="secondary" type="button">新增小合集</button><button id="runBtn" class="primary" disabled>生成视频笔记</button></div></div>
       <div class="group-actions">
-        <span>选择要生成的小合集：</span>
+        <span>左侧=处理视频，右侧=合成教程：</span>
         <button id="selectAllGroupsBtn" class="secondary" type="button">全选</button>
         <button id="selectNoGroupsBtn" class="secondary" type="button">全不选</button>
       </div>
       <div id="groupList" class="group-list"></div>
+      <div class="video-assignment-head"><strong>人工调整视频归属</strong><span>每个视频都可以改到任意小合集</span></div>
+      <div id="videoAssignmentList" class="video-assignment-list"></div>
+      <div class="aggregate-options">
+        <label><input id="aggregateIncludeSubtitles" type="checkbox" /> 合成小合集时同时加入原始字幕（更耗 Token）</label>
+        <textarea id="aggregatePrompt" placeholder="可选：填写小合集教程的额外要求，例如“重点讲清代码执行流程，增加复习清单”。"></textarea>
+      </div>
+      <p class="hint">AI 分组只根据标题提出建议；你可以修改小合集名称、添加小合集，或在下方调整每个视频归属。视频笔记和小合集教程分开生成。</p>
     </section>
 
     <section id="progressCard" class="card" hidden>
       <div class="progress-row"><span id="progressText">等待开始</span><span id="progressCount"></span></div>
       <progress id="progressBar" value="0" max="1"></progress>
-      <div class="progress-actions"><button id="startBtn" class="primary" type="button">开始生成</button><button id="pauseBtn" class="secondary" type="button">暂停</button><button id="clearCheckpointBtn" class="secondary" type="button">清除断点</button></div>
+      <div class="progress-actions"><button id="startBtn" class="primary" type="button">开始/继续生成视频笔记</button><button id="aggregateBtn" class="secondary" type="button">合成已勾选小合集</button><button id="pauseBtn" class="secondary" type="button">暂停</button><button id="clearCheckpointBtn" class="secondary" type="button">清除断点</button></div>
       <pre id="log"></pre>
     </section>
 
